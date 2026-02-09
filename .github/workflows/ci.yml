@@ -1,0 +1,172 @@
+name: Python CI (uv)
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'Test*'
+      - 'Prod*'
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+  security-events: write
+
+jobs:
+  # -------------------------------------------------
+  # 1 SAST — Semgrep
+  # -------------------------------------------------
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+
+    container:
+      image: python:3.10.18
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep (HIGH / CRITICAL only)
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: "p/security-audit p/python"
+        env:
+          SEMGREP_FAIL_ON: "HIGH"
+
+  # -----------------------------
+  # 2️ Secret Detection → Gitleaks
+  # -----------------------------
+  secrets:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} # Only required for Organizations, not personal accounts.
+
+  # -----------------------------
+  # 3️ Dependency Scanning
+  # -----------------------------
+
+  # You need Advance Security for this
+
+  dependencies:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+
+  # -----------------------------
+  # 4 Pre Commit
+  # -----------------------------
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v3
+    - uses: pre-commit/action@v3.0.1
+
+  # -------------------------------------------------
+  # 5 Build
+  # -------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.10.18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full Git history for pre-commit
+
+      # -----------------------------
+      # Cache uv dependencies
+      # -----------------------------
+      - name: Cache uv
+        uses: actions/cache@v3
+        with:
+          path: |
+            .uv
+            .cache/pip
+          key: ${{ runner.os }}-uv-${{ github.sha }}
+
+      # -----------------------------
+      # Install OS dependencies
+      # -----------------------------
+      - name: Install OS dependencies
+        run: |
+          apt-get update && apt-get install -y git wget gnupg lsb-release curl docker.io libatomic1 ca-certificates
+          python --version
+          git --version
+
+      # -----------------------------
+      # Install uv & dependencies
+      # -----------------------------
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Uv Sync
+        run: |
+          uv --version
+          uv sync --no-dev
+
+  # -------------------------------------------------
+  # 6 Test
+  # -------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.10.18
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print environment
+        run: env
+
+  # -------------------------------------------------
+  # 7 Deploy to Testing
+  # -------------------------------------------------
+  deploy_test:
+    if: startsWith(github.ref_name, 'Test')
+    runs-on: ubuntu-latest
+    needs: test
+    environment: testing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print environment
+        run: env
+
+      - name: Run release script
+        env:
+          ENV_TIER: ${{ vars.ENV_TIER }}
+        run: ./scripts/release_execute.sh
+
+  # -------------------------------------------------
+  # 8 Deploy to Production
+  # -------------------------------------------------
+  deploy_prod:
+    if: startsWith(github.ref_name, 'Prod')
+    runs-on: ubuntu-latest
+    needs: test
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print environment
+        run: env
+
+      - name: Run release script
+        env:
+          ENV_TIER: ${{ vars.ENV_TIER }}
+        run: ./scripts/release_execute.sh
